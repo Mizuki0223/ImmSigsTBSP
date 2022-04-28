@@ -1,0 +1,496 @@
+```{r setup, include=FALSE}
+suppressPackageStartupMessages({
+  library(edgeR)
+  library(sva)
+  library(SingleCellExperiment)
+  library(TBSignatureProfiler)
+  library(tidyverse)
+  library(stringi)
+  library(hypeR)
+  library(DelayedArray)
+  library(knitr)
+  library(kableExtra)
+  library(readxl)
+})
+  
+knitr::opts_chunk$set(cache = TRUE)
+knitr::opts_chunk$set(echo = FALSE)
+#knitr::opts_chunk$set(dev = "svg", dpi = 300)
+#  library(reshape2)
+#  library(RColorBrewer)
+#  library(limma)
+#  library(knitr)
+#  library(pander)
+#  library(xtable)
+#})
+
+```
+
+
+# Loading and processing data
+```{r load data, include=FALSE}
+
+#indata is a SingleCellExperiment object
+indata <- readRDS("new_indata_SCE.rds")
+
+df <- read_xlsx("subject_coldata_cc_excel.xlsx")
+df <- column_to_rownames(df, var="...1")
+
+
+## Removing Outliers
+indata <- indata[,-which(colnames(indata) %in% c("10200459B","10200335A","10200332A"))]
+
+
+
+# change ages
+#colData(indata)$new_age <- df$age
+
+# Want to have 5% present rate
+indata <- indata[apply(assay(indata,"counts") != 0, 1, mean)>.2,] 
+
+
+## Correct some errors in metadata
+colData(indata)$Tb_status[grep("074", colnames(indata))] <- "LTBI"
+colData(indata)$Tb_status[grep("082", colnames(indata))] <- "LTBI"
+colData(indata)$Tb_status[grep("111", colnames(indata))] <- "LTBI"
+
+
+
+
+
+## Make CPM and log_cpm
+#indata  = mkAssay(indata, log = TRUE, counts_to_CPM = TRUE)
+#assays(indata)
+
+## Make Severely Malnourished column data
+colData(indata)$Tb_status <- factor(gsub("activeTB", "TB", as.character(colData(indata)$Tb_status)))
+colData(indata)$bmi_cat2 <- factor(gsub("severely malnourished", "mal", gsub("well nourished", "well", colData(indata)$bmi_cat2)))
+colData(indata)$status <- factor(paste(colData(indata)$Tb_status, colData(indata)$bmi_cat2, sep="_"))
+table(colData(indata)$status)
+
+
+colData(indata)$bmi_cat2[grep("082", colnames(indata))] <- factor("mal")
+colData(indata)$status[grep("082", colnames(indata))] <- factor("LTBI_mal")
+
+colData(indata)$bmi_cat2[grep("111", colnames(indata))] <- factor("mal")
+colData(indata)$status[grep("111", colnames(indata))] <- factor("LTBI_mal")
+
+
+```
+
+### ComBat Batch correction
+```{r corrected data, message=FALSE, results='hide', include = FALSE}
+
+## Make batch variable
+batch=rep(1,ncol(indata))
+batch[colnames(indata) %in% c("10200247B")]=1
+batch[colnames(indata) %in% c("10200227B","10200346A","10200381A","10200308A","10200361A","10200365B","10200467B","10200341A","10200374A", "10200548B","10200343A","10200374B","10200346A","10200377A") ]=1
+batch[colnames(indata)%in% c("10200070A", "10200128A","10200056A", "10200075A","10200136A", "10200105A","10200034A","10200058A", "10200007A", "10200064A","10200159A","10200077A","10200073A","10200130A","10200181A","10200059A","10200040B","10200018B","10200065B","10200003B","10200024B","10200004B","10200009B","10200001B","10200057B","10200029B","10200077B","10200035B","10200061B","10200030B","10200063B","10200034B","10200010A","10200288A","10200082A","10200074A","10200060A","10200023A","10200140A","10200111A","10200112A","10200016A","10200015A","10200087A")]=2
+colData(indata)$batch <- factor(batch)
+rm(batch)
+
+modcombat <- model.matrix(~colData(indata)$bmi_cat2+colData(indata)$Tb_status)
+
+combined_India.combatSeqCorrect <- ComBat_seq(assay(indata, "counts"),
+                                      colData(indata)$batch, group=NULL,
+                                      covar_mod=modcombat)
+
+assay(indata, "combatseq") <- combined_India.combatSeqCorrect
+assays(indata)
+indata <- mkAssay(indata, input_name = "combatseq", log = TRUE)
+
+
+rm(modcombat, combined_India.combatSeqCorrect)
+
+```
+
+
+
+
+### Keep only LTBI
+```{r filter, include=FALSE}
+indata = indata[,colData(indata)$Tb_status=="LTBI"]
+dim(indata)
+table(colData(indata)$bmi_cat2)
+ 
+```
+
+
+
+### Keep only protein coding genes
+```{r filter-by-gene-type, include=FALSE}
+
+#indata <- as(indata, "SingleCellExperiment")
+
+prot_code <- indata@rowRanges@elementMetadata
+prot_ <- prot_code[which(prot_code$V2 == "protein_coding"),]
+prot <- as.character.Array(prot_@listData$V1)
+
+indata = indata[indata@rowRanges@partitioning@NAMES %in% prot,]
+
+rm(prot_, prot_code, prot)
+```
+
+
+# Distribution of data
+
+## Boxplot of age/bmi_cat2
+```{r, include=FALSE, eval=FALSE}
+
+#library(bit64)
+df$age <- as.numeric(df$age)
+age <- as.numeric(df$age)
+names(age) <- (df$SUBJID)
+
+
+# change to match correct ages to colData
+test <- as.data.frame(colData(indata)$SUBJID)
+test$ages <- age[match(test$`colData(indata)$SUBJID`, names(age))]
+
+colData(indata)$age <- test$ages
+
+df <- as.data.frame(colData(indata))
+
+boxplot(as.numeric(df$age)~df$bmi_cat2)
+```
+
+
+
+
+# SignatureProfiler {.tabset}
+
+## TBSigProfiler Pathways {.tabset}
+```{r, message=FALSE, results='hide'}
+### make a character list of SUBJID from low BMI to Hi BMI
+
+df <- as.data.frame(indata@colData@listData)
+order_bmi <- select(df, SUBJID, BMI)
+ordered_bmi <- order_bmi[order(order_bmi$BMI),]
+
+## Keep some pathways in the template as comparison
+
+TBsignatures$Leong_RISK_29 <- c("SRBD1", "ZNF419", "SH2D1B","CTSA", "GSTA4", "AGAP9", "MOB3C", "WARS1", "LUC7L", "ZNRF1", "CIRBP", "PRSS53", "APOL6", "TCN2", "MDN1", "SNRNP70", "SLC3A1", "NAGA", "SPDYE5",  "SPSB1", "CCDC14",  "IL31RA", "DERA", "FUT4", "NEIL1", "ENO3", "CCDC78", "HM13", "ZNF202")
+
+TBsignatures$Zak_RISK_16 <- c("ANKRD22","APOL1","BATF2" ,"ETV7","FCGR1A", "FCGR1B",  "GBP1","GBP2","GBP4","GBP5", "SCARF1","SEPTIN4", "SERPING1", "STAT1","TAP1","TRAFD1")
+
+## Add new signatures to the profiler
+
+TBsignatures$Palmer_40 <- c("IL7", "IL7RA", "IL15", "IL15RA", "BCL2", "BCLXL", "CREBBP", "EP300", "FYN", "IL2RG", "ITGA2B", "JAK1", "JAK3", "LCK", "NMI", "PIK3CA", "PIK3R1", "PTK2B", "STAT5A", "STAT5B", "PDK", "NFKB", "SOCS", "GSK3", "AKT", "MTOR", "CDC25", "PIM1", "PIM2", "P27KIP", "CDC25", "IKK", "IKB", "EIF4E", "BAD", "CDK2", "CDK4", "CDK6", "CD8", "GFI1")
+
+TBsignatures$Naldi_OD_28 <- c("SYK", "RAC1", "TJP1", "CTTN", "PIK3", "ACTB", "RHOA", "GRB2", "SHC1", "SHC2", "SHC3", "SHC4", "SRC", "ARF6", "PIP5K1A", "PIP5K1B", "PIP5K1C", "EZR", "PTEN", "PLCG1", "PLCG2", "PIP4K2A", "PIP4K2B", "GAB2", "SOS1", "PRKCQ", "LCK", "PDPK1")
+
+# Shorten
+samp_tbsignatures <- TBsignatures[c("Leong_RISK_29", "Zak_RISK_16", "Palmer_40", "Naldi_OD_28")]
+
+
+gsva_res <- runTBsigProfiler(indata, useAssay = "log_cpm", algorithm = "GSVA",
+                             signatures = samp_tbsignatures, parallel.sz = 4)
+ssgsea_res <- runTBsigProfiler(indata, useAssay = "log_cpm", algorithm = "ssGSEA",
+                               signatures = samp_tbsignatures, parallel.sz = 4)
+
+plage_res <- runTBsigProfiler(indata, useAssay = "log_cpm", algorithm = "PLAGE", signatures = samp_tbsignatures, parallel.sz = 4)
+
+```
+
+### GSVA {.tabset}
+
+#### Heatmap
+
+```{r subgsva_a_TBsigs}
+signatureHeatmap(gsva_res, name="GSVA", signatureColNames = names(samp_tbsignatures),
+                 annotationColNames = c("bmi_cat2"),
+                 showColumnNames = FALSE,
+                 split_heatmap='none')
+```
+
+
+#### Boxplot
+
+```{r boxgsva_TBsigs}
+signatureBoxplot(gsva_res, name="GSVA", signatureColNames = names(samp_tbsignatures),
+                 annotationColName = c("bmi_cat2"))# , rotateLabels = TRUE)
+```
+
+#### Boxplots Single {.tabset}
+
+```{r , results="asis"}
+for (i in names(samp_tbsignatures)){
+
+  cat("#####", i, "\n")
+
+  print(signatureBoxplot(gsva_res,
+                         name=i, 
+                         signatureColNames = i,
+                         annotationColName = c("bmi_cat2"),   
+                         rotateLabels = T))
+
+  cat("\n\n")
+}
+
+```
+
+#### Signature plots {.tabset}
+```{r genes_gsva_TBsigs, results="asis"}
+for (i in names(samp_tbsignatures)){
+
+  cat("#####", i, "\n")
+
+  signatureGeneHeatmap(gsva_res, useAssay="log_cpm",
+                     samp_tbsignatures[[i]],
+                     name = i, signatureColNames = NULL,
+                     annotationColNames = c("bmi_cat2",i),
+                     showColumnNames = TRUE, 
+                     column_order = ordered_bmi[,1])
+
+  cat("\n\n")
+}
+
+```
+
+#### AUC Table {.tabset}
+```{r, message = FALSE}
+set.seed(0)
+tableAUC(gsva_res,
+         annotationColName = "bmi_cat2",
+         signatureColNames = names(samp_tbsignatures),
+         num.boot = 100,
+         pb.show = FALSE)
+```
+
+#### AUC Boxplots
+```{r, message = FALSE}
+set.seed(0)
+compareBoxplots(gsva_res, annotationColName = "bmi_cat2",
+                signatureColNames = names(samp_tbsignatures),
+                pb.show = FALSE, fill.col = "blue",
+                rotateLabels = TRUE)
+```
+
+#### ROC plots
+```{r, message = FALSE, fig.height = 9, fig.width = 12}
+signatureROCplot_CI(inputData = gsva_res,
+                   signatureColNames = names(samp_tbsignatures),
+                   annotationColName = "bmi_cat2")
+
+```
+
+#### Separate ROC plots  {.tabset}
+
+```{r, results = 'asis', message = FALSE}
+for (i in names(samp_tbsignatures)){
+
+  cat("#####", i, "\n")
+
+  print(signatureROCplot_CI(inputData = gsva_res,
+                   signatureColNames = i,
+                   annotationColName = "bmi_cat2",
+                   name = paste("ROC plot,", i, sep = " ")))
+
+  cat("\n\n")
+}
+```
+
+
+### ssGSEA {.tabset}
+
+#### Heatmap
+
+```{r subssgsea_a_TBsigs}
+signatureHeatmap(ssgsea_res, name="ssGSEA", signatureColNames = names(samp_tbsignatures),
+                 annotationColNames = c("bmi_cat2"),
+                 showColumnNames = FALSE, scale = TRUE,
+                 split_heatmap='none')
+```
+
+#### Boxplot
+
+```{r boxssgsea_TBsigs}
+signatureBoxplot(ssgsea_res, name="ssGSEA", signatureColNames = names(samp_tbsignatures),
+                 annotationColName = c("bmi_cat2"), scale = TRUE) #rotateLabels = TRUE,
+```
+
+#### Boxplots Single {.tabset}
+
+```{r , results="asis"}
+for (i in names(samp_tbsignatures)){
+
+  cat("#####", i, "\n")
+
+  print(signatureBoxplot(ssgsea_res, name=i, signatureColNames = i,
+                 annotationColName = c("bmi_cat2"), rotateLabels = T))
+
+  cat("\n\n")
+}
+
+```
+
+#### Signature plots {.tabset}
+```{r genes_ssgsea_TBsigs, results="asis"}
+for (i in names(samp_tbsignatures)){
+
+  cat("#####", i, "\n")
+
+  signatureGeneHeatmap(ssgsea_res, useAssay="log_cpm",
+                     samp_tbsignatures[[i]],
+                     name = i, signatureColNames = NULL,
+                     annotationColNames = c("bmi_cat2",i),
+                     showColumnNames = FALSE, 
+                     column_order =  NULL)
+
+  cat("\n\n")
+}
+
+```
+
+
+#### AUC Table
+```{r, message = FALSE}
+set.seed(0)
+tableAUC(ssgsea_res,
+         annotationColName = "bmi_cat2",
+         signatureColNames = names(samp_tbsignatures),
+         num.boot = 100,
+         pb.show = FALSE)
+```
+
+#### AUC Boxplots {.tabset}
+```{r ssGSEA-AUC-boxplot, message = FALSE}
+set.seed(0)
+compareBoxplots(ssgsea_res, annotationColName = "bmi_cat2",
+                signatureColNames = names(samp_tbsignatures),
+                pb.show = FALSE, fill.col = "blue",
+                rotateLabels = TRUE)
+```
+
+#### ROC plots
+```{r, message = FALSE, fig.height = 9, fig.width = 12}
+signatureROCplot_CI(inputData = ssgsea_res,
+                   signatureColNames = names(samp_tbsignatures),
+                   annotationColName = "bmi_cat2")
+
+```
+
+#### Separate ROC plots  {.tabset}
+
+```{r, results = 'asis', message = FALSE}
+for (i in names(samp_tbsignatures)){
+
+  cat("#####", i, "\n")
+
+  print(signatureROCplot_CI(inputData = ssgsea_res,
+                   signatureColNames = i,
+                   annotationColName = "bmi_cat2",
+                   name = paste("ROC plot,", i, sep = " ")))
+
+  cat("\n\n")
+}
+```
+
+
+### PLAGE {.tabset}
+
+
+#### Heatmap
+
+```{r plage_TBsigs}
+signatureHeatmap(plage_res, name="PLAGE", signatureColNames = names(samp_tbsignatures),
+                 annotationColNames = c("bmi_cat2"),
+                 showColumnNames = FALSE,
+                 split_heatmap='none')
+```
+
+
+#### Boxplot
+
+```{r boxplage_TBsigs}
+signatureBoxplot(plage_res, name="PLAGE", signatureColNames = names(samp_tbsignatures),
+                 annotationColName = c("bmi_cat2"))# , rotateLabels = TRUE)
+```
+
+#### Boxplots Single {.tabset}
+
+```{r , results="asis"}
+for (i in names(samp_tbsignatures)){
+
+  cat("#####", i, "\n")
+
+  print(signatureBoxplot(plage_res,
+                         name=i, 
+                         signatureColNames = i,
+                         annotationColName = c("bmi_cat2"),   
+                         ##violinPlot = TRUE,
+                         rotateLabels = T))
+
+  cat("\n\n")
+}
+
+```
+
+#### Signature plots {.tabset}
+```{r genes_plage_TBsigs, results="asis"}
+for (i in names(samp_tbsignatures)){
+
+  cat("#####", i, "\n")
+
+  signatureGeneHeatmap(plage_res, useAssay="log_cpm",
+                     samp_tbsignatures[[i]],
+                     name = i, signatureColNames = NULL,
+                     annotationColNames = c("bmi_cat2",i),
+                     showColumnNames = TRUE, 
+                     column_order = ordered_bmi[,1])
+
+  cat("\n\n")
+}
+
+```
+
+#### AUC Table {.tabset}
+```{r, message = FALSE}
+set.seed(0)
+tableAUC(plage_res,
+         annotationColName = "bmi_cat2",
+         signatureColNames = names(samp_tbsignatures),
+         num.boot = 100,
+         pb.show = FALSE)
+```
+
+#### AUC Boxplots
+```{r, message = FALSE}
+set.seed(0)
+compareBoxplots(plage_res, annotationColName = "bmi_cat2",
+                signatureColNames = names(samp_tbsignatures),
+                pb.show = FALSE, fill.col = "blue",
+                rotateLabels = TRUE)
+```
+
+#### ROC plots
+```{r, message = FALSE, fig.height = 9, fig.width = 12}
+signatureROCplot_CI(inputData = plage_res,
+                   signatureColNames = names(samp_tbsignatures),
+                   annotationColName = "bmi_cat2")
+
+```
+
+#### Separate ROC plots  {.tabset}
+
+```{r, results = 'asis', message = FALSE}
+for (i in names(samp_tbsignatures)){
+
+  cat("#####", i, "\n")
+
+  print(signatureROCplot_CI(inputData = plage_res,
+                   signatureColNames = i,
+                   annotationColName = "bmi_cat2",
+                   name = paste("ROC plot,", i, sep = " ")))
+
+  cat("\n\n")
+}
+```
+
+
+
+
+# Session Info
+```{r session info}
+sessionInfo()
+```
